@@ -1,5 +1,6 @@
 import sqlite3
 import traceback
+import re
 from termcolor import colored, cprint
 
 
@@ -37,14 +38,6 @@ class Main:
         print_status("Starting airline database control CLI application...")
         # initialize databases
         self.initDB()
-        self.tableHeaders = {}
-        for name in self.table_names:
-            self.tableHeaders[name] = self.getHeaders(name)
-
-    def getHeaders(self, table):
-        query = "SELECT name FROM PRAGMA_TABLE_INFO(?)"
-        res = self.db_cursor.execute(query, (table, )).fetchall()
-        return [row[0] for row in res]
 
     def initDB(self):
         try:
@@ -52,35 +45,42 @@ class Main:
             self.conn = sqlite3.connect(self.db_name)
             print_status(f"Successfully connected with DB: {self.db_name}")
             self.db_cursor = self.conn.cursor()
+            self.db_cursor.execute("PRAGMA foreign_keys = ON")
 
             # initialize tables
             self.db_cursor.execute("\
                 CREATE TABLE IF NOT EXISTS aircraft (\
-                    aircraft_id TEXT PRIMARY KEY,\
+                    aircraft_id INTEGER PRIMARY KEY,\
                     age INTEGER NOT NULL,\
                     capacity INTEGER NOT NULL\
                 );")
             print_status("Successfully connected with table: aircraft")
 
             self.db_cursor.execute("\
-                CREATE TABLE IF NOT EXISTS flight (\
-                    flight_id TEXT PRIMARY KEY,\
-                    start_airport TEXT NOT NULL,\
-                    destination_airport TEXT NOT NULL,\
-                    departure_date TEXT NOT NULL,\
-                    aircraft_id TEXT NOT NULL,\
-                    pilot_1 TEXT NOT NULL,\
-                    pilot_2 TEXT NOT NULL\
-                );")
-            print_status("Successfully connected with table: flight")
-
-            self.db_cursor.execute("\
                 CREATE TABLE IF NOT EXISTS pilot (\
-                    staff_id TEXT PRIMARY KEY,\
+                    staff_id INTEGER PRIMARY KEY,\
                     last_name TEXT NOT NULL,\
                     first_name TEXT NOT NULL\
                 );")
             print_status("Successfully connected with table: pilot")
+
+            self.db_cursor.execute("\
+                CREATE TABLE IF NOT EXISTS flight (\
+                    flight_id TEXT PRIMARY KEY,\
+                    start_airport TEXT NOT NULL,\
+                    destination_airport TEXT NOT NULL,\
+                    departure_date TEXT DEFAULT '2022-01-01' NOT NULL,\
+                    aircraft_id INTEGER NOT NULL,\
+                    pilot_1 INTEGER NOT NULL,\
+                    pilot_2 INTEGER,\
+                    FOREIGN KEY (aircraft_id)\
+                        REFERENCES aircraft (aircraft_id)\
+                    FOREIGN KEY (pilot_1)\
+                        REFERENCES pilot (staff_id)\
+                    FOREIGN KEY (pilot_2)\
+                        REFERENCES pilot (staff_id)\
+                );")
+            print_status("Successfully connected with table: flight")
 
             if not self.db_cursor.execute("SELECT COUNT(1) FROM pilot;").fetchone()[0]:
                 init_pilot_query = "INSERT INTO pilot (staff_id, last_name, first_name) VALUES (:staff_id, :last_name, :first_name);"
@@ -107,44 +107,37 @@ class Main:
 
     def insert(self):
         try:
-            prompt = format_prompt(
-                "Input flight data in the following format:\nflight_id, start_airport, destination_airport, departure_date (YYYY-MM-DD), aircraft_id, pilot_1, pilot_2.\nNote: flight_id must be a unique string (e.g. BA 123)\nNote: Only pilot_2 is optional\n")
-            data = [field.strip() for field in input(prompt).split(",")]
-            if len(data) != 6 and len(data) != 7:
-                print_error("Invalid input")
-                return
-            params = {
-                "flight_id": data[0],
-                "start_airport": data[1],
-                "destination_airport": data[2],
-                "departure_date": data[3],
-                "aircraft_id": data[4],
-                "pilot_1": data[5],
-                "pilot_2": data[6],
+            insert_dict = {
+                "flight": {
+                    "prompt": "Input data in the following format: flight_id, start_airport, destination_airport, departure_date (YYYY-MM-DD), aircraft_id, pilot_1, pilot_2\nNote:\n\t- flight_id must be unique\n\t- Only pilot_2 is optional. If you skip this field, still input a comma to separate the field with other fields\n",
+                    "query": "INSERT INTO flight (flight_id, start_airport, destination_airport, departure_date, aircraft_id, pilot_1, pilot_2) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                },
+                "pilot": {
+                    "prompt": "Input data in the following format: staff_id, last_name, first_name\nNote:\n\t- staff_id must be unique\n\t- all fields are compulsory\n",
+                    "query": "INSERT INTO pilot (staff_id, last_name, first_name) VALUES (?, ?, ?)"
+                },
+                "aircraft": {
+                    "prompt": "Input data in the following format: staff_id, last_name, first_name\nNote:\n\t- staff_id must be unique\n\t- all fields are compulsory\n",
+                    "query": "INSERT INTO aircraft (aircraft_id, age, capacity) VALUES (?, ?, ?)"
+                }
             }
 
-            # check whether the aircraft and pilots exist
-            # if len(data) == 7:
-            #     params["pilot_2"] = data[6]
-
-            if not self.checkItemExistInTable(params["aircraft_id"], "aircraft_id", "aircraft"):
-                print_error(f"aircraft_id does not exist")
+            prompt = format_prompt(
+                f"Which table to insert to? ({' '.join(list(insert_dict.keys()))}): ")
+            option = input(prompt).strip()
+            if not option or not (option in list(insert_dict.keys())):
+                print_error(
+                    f"Invalid input; Only accept: {' '.join(list(insert_dict.keys()))}")
                 return
 
-            if not self.checkItemExistInTable(params["pilot_1"], "staff_id", "pilot"):
-                print_error(f"pilot_1 does not exist")
+            data = [field.strip() for field in input(
+                format_prompt(insert_dict[option]["prompt"])).split(",")]
+
+            if error := self.validateData(data, option):
+                print_error(error)
                 return
 
-            if not self.checkItemExistInTable(params["pilot_2"], "staff_id", "pilot"):
-                print_error(f"pilot_2 does not exist")
-                return
-
-            # if len(params) == 7:
-            _query = "INSERT INTO flight (flight_id, start_airport, destination_airport, departure_date, aircraft_id, pilot_1, pilot_2) VALUES (:flight_id, :start_airport, :destination_airport, :departure_date, :aircraft_id, :pilot_1, :pilot_2);"
-            # else:
-            #     _query = "INSERT INTO flight (flight_id, start_airport, destination_airport, departure_date, aircraft_id, pilot_1) VALUES (:flight_id, :start_airport, :destination_airport, :departure_date, :aircraft_id, :pilot_1);"
-
-            self.db_cursor.execute(_query, params)
+            self.db_cursor.execute(insert_dict[option]["query"], data)
             self.conn.commit()
             print_status('Data successfully inserted.')
         except Exception as e:
@@ -153,32 +146,52 @@ class Main:
 
     def update(self):
         try:
-            prompt = format_prompt(
-                "Update flight data in the following format:\nflight_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\ne.g. BA123, start_airport=BLN\nNote: flight_id is not editable.\n")
-            data = [field.strip() for field in input(prompt).split(",")]
+            update_dict = {
+                "flight": {
+                    "prompt": "Update flight data in the following format: flight_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\nNotes:\n\t- e.g. BA123, start_airport=BLN\n\t- flight_id is not editable\n",
+                    "query": "UPDATE flight SET conds_placeholder WHERE flight_id=?",
+                    "pk": "flight_id"
+                },
+                "pilot": {
+                    "prompt": "Update pilot data in the following format: staff_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\nNotes:\n\t- e.g. 1, last_name=smith\n\t- staff-id is not editable\n",
+                    "query": "UPDATE pilot SET conds_placeholder WHERE staff_id=?",
+                    "pk": "staff_id"
+                },
+                "aircraft": {
+                    "prompt": "Update aircraft data in the following format: aircraft_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\nNotes:\n\t- e.g. 1, age=1\n\t- aircraft_id is not editable\n",
+                    "query": "UPDATE aircraft SET conds_placeholder WHERE aircraft_id=?",
+                    "pk": "aircraft_id"
+                }
+            }
 
-            if len(data) < 2:
-                print_error("Invalid input")
+            prompt = format_prompt(
+                f"Which table to update? ({' '.join(list(update_dict.keys()))}): ")
+            option = input(prompt).strip()
+            if not option or not (option in list(update_dict.keys())):
+                print_error(
+                    f"Invalid input; Only accept: {' '.join(list(update_dict.keys()))}")
                 return
 
-            params = {"flight_id": data[0]}
-            for attr_str in data[1:]:
-                attr = attr_str.split("=")
-                if len(attr) != 2:
-                    print_error(
-                        "Invalid input: attribute key and value must be separated by =")
-                    return
-                if attr[0] not in self.flightTableHeader:
-                    print_error("Invalid input: attribute key is invalid")
-                    return
-                params[attr[0]] = attr[1]
+            data = [field.strip() for field in input(
+                format_prompt(update_dict[option]["prompt"])).split(",")]
 
-            conds = ','.join(
-                f"{key}=:{key}" for key in params if key != "flight_id")
-            _query = f"UPDATE flight SET {conds} WHERE flight_id=:flight_id"
+            if error := self.validateUpdateData(data, update_dict, option):
+                print_error(error)
+                return
+
+            conds = []
+            params = []
+            for arg in data[1:]:
+                _split = arg.split("=")
+                conds.append(_split[0].strip() + "=?")
+                params.append(_split[1].strip())
+            _query = update_dict[option]["query"].replace(
+                "conds_placeholder", ",".join(conds))
+            params.append(data[0])
+
             self.db_cursor.execute(_query, params)
             self.conn.commit()
-            print_status(f'Successfully updated flight {data[0]}.')
+            print_status(f'Successfully updated {option} {data[0]}.')
         except Exception as e:
             print_error(e)
             print(traceback.format_exc())
@@ -198,7 +211,7 @@ class Main:
             self.conn.commit()
             print_status(
                 f'Successfully delete flight {flight_id}. Here is the latest view of flight:')
-            self.view_flight()
+            self.view("flight")
         except:
             print(traceback.format_exc())
 
@@ -208,82 +221,53 @@ class Main:
     def alter(self):
         raise NotImplementedError()
 
-    def view(self):
+    def view(self, option=False):
         try:
-            prompt = format_prompt(
-                "Input flight / pilot / aircraft / all:\n")
-
-            subFunc = {
-                "flight": self.view_flight,
-                "pilot": self.view_pilot,
-                "aircraft": self.view_aircraft,
-                "all": self.view_all
+            prompt = format_prompt("Input flight / pilot / aircraft / all:\n")
+            query_dict = {
+                "flight": "SELECT * FROM flight",
+                "pilot": "SELECT * FROM pilot",
+                "aircraft": "SELECT * FROM aircraft",
+                "all": "SELECT flight_id, start_airport, destination_airport, departure_date, a.aircraft_id, a.age AS aircraft_age, a.capacity AS aircraft_capacity, pilot_1, p1.first_name || ' ' || p1.last_name AS pilot1_name, pilot_2, p2.first_name || ' ' || p2.last_name AS pilot2_name\
+                        FROM flight \
+                        INNER JOIN aircraft AS a ON flight.aircraft_id = a.aircraft_id \
+                        INNER JOIN pilot AS p1 ON flight.pilot_1 = p1.staff_id \
+                        LEFT JOIN pilot AS p2 ON flight.pilot_2 = p2.staff_id"
             }
-            subFunc.get(input(prompt).strip(), self.view_invalid)()
 
-        except:
+            if not option:
+                option = input(prompt).strip()
+
+            if _query := query_dict.get(option, False):
+                self.display_table(_query)
+            else:
+                print_error(
+                    "Invalid input; Only accept: flight pilot aircraft all")
+
+        except Exception as e:
+            print_error(e)
             print(traceback.format_exc())
 
-    def view_flight(self):
-        _h = self.tableHeaders["flight"]
-        print_table(
-            f"{_h[0]:15} {_h[1]:15} {_h[2]:20} {_h[3]:20} {_h[4]:15} {_h[5]:10} {_h[6]}")
-        for row in self.db_cursor.execute("SELECT * FROM flight"):
-            print_table(
-                f"{row[0]:15} {row[1]:15} {row[2]:20} {row[3]:20} {row[4]:15} {row[5]:10} {row[6]}")
-
-    def view_pilot(self):
-        _h = self.tableHeaders["pilot"]
-        print_table(f"{_h[0]:15} {_h[1]:20} {_h[2]}")
-        for row in self.db_cursor.execute("SELECT * FROM pilot"):
-            print_table(f"{row[0]:15} {row[1]:20} {row[2]}")
-
-    def view_aircraft(self):
-        _h = self.tableHeaders["aircraft"]
-        print_table(f"{_h[0]:15} {_h[1]:20} {_h[2]}")
-        for row in self.db_cursor.execute("SELECT * FROM aircraft"):
-            print_table(f"{row[0]:15} {str(row[1]):20} {row[2]}")
-
-    def view_all(self):
-        # TODO: adjust for changable column names etc
-        _query = "SELECT flight_id, start_airport, destination_airport, departure_date, a.aircraft_id, a.age AS aircraft_age, a.capacity AS aircraft_capacity, pilot_1, p1.first_name || ' ' || p1.last_name AS pilot1_name, pilot_2, p2.first_name || ' ' || p2.last_name AS pilot2_name\
-            FROM flight \
-            INNER JOIN aircraft AS a ON flight.aircraft_id = a.aircraft_id \
-            INNER JOIN pilot AS p1 ON flight.pilot_1 = p1.staff_id \
-            INNER JOIN pilot AS p2 ON flight.pilot_2 = p2.staff_id"
-        # TODO: to find a better way to print table
-        _h = ["flight_id", "start_airport", "destination_airport", "departure_date", "aircraft_id",
-              "aircraft_age (years)", "aircraft_capacity", "pilot1_id", "pilot1_name", "pilot2_id", "pilot2_name"]
-        print_table(
-            f"{_h[0]:15} {_h[1]:15} {_h[2]:20} {_h[3]:20} {_h[4]:15} {_h[5]:10} {_h[6]:15} {_h[7]:15} {_h[8]:15} {_h[9]:15} {_h[10]:15}")
-        for row in self.db_cursor.execute(_query):
-            print_table(
-                f"{row[0]:15} {row[1]:15} {row[2]:20} {row[3]:20} {row[4]:15} {row[5]:10} {row[6]:15} {row[7]:15} {row[8]:15} {row[9]:15} {row[10]:15}")
-
-    def view_invalid(self):
-        print_error(
-            "Invalid input for view - only flight / pilot / aircraft / all is accepted")
-
-    def stat(self):
+    def stat(self, option=False):
         try:
             stat_dict = {
-                1: {
+                "1": {
                     "description": "total number of flight (group by destination)",
                     "query": "SELECT destination_airport, COUNT(*) AS total_flight FROM flight GROUP BY destination_airport",
                 },
-                2: {
+                "2": {
                     "description": "total number of flight (group by month)",
                     "query": "SELECT month, COUNT(*) AS total_flight FROM\
                         (SELECT substr(departure_date, 6, 2) AS month FROM flight) GROUP BY month ORDER BY month",
                 },
-                3: {
+                "3": {
                     "description": "totaL number of flight (group by month and destination)",
                     "query": "SELECT month, destination_airport, COUNT(*) AS total_flight FROM\
                         (SELECT substr(departure_date, 6, 2) AS month, destination_airport FROM flight)\
                         GROUP BY month, destination_airport\
                         ORDER BY month",
                 },
-                4: {
+                "4": {
                     "description": "total pilot duty (group by pilot)",
                     "query": "SELECT staff_id, first_name || ' ' || last_name AS name, pilot_duty_count FROM pilot INNER JOIN \
                         (\
@@ -295,37 +279,35 @@ class Main:
                                 )\
                             GROUP BY pilot_id ORDER BY pilot_id\
                         )\
-                        ON pilot_id = staff_id"
+                        ON pilot_id = staff_id\
+                        ORDER BY pilot_duty_count DESC"
                 },
-                5: {
+                "5": {
                     "description": "average aircraft age",
                     "query": "SELECT AVG(age) AS average_age FROM aircraft"
                 },
             }
 
-            prompt = format_prompt(f"""\
-                \nSelect the statistics you wish to view (input 1-5):\
-                \n\t1. {stat_dict[1]["description"]}\
-                \n\t2. {stat_dict[2]["description"]}\
-                \n\t3. {stat_dict[3]["description"]}\
-                \n\t3. {stat_dict[4]["description"]}\
-                \n\t5. {stat_dict[5]["description"]}\
-            """)
-            print(prompt)
+            if not option:
+                prompt = format_prompt(f"""\
+                    \nSelect the statistics you wish to view (input 1-5):\
+                    \n\t1. {stat_dict["1"]["description"]}\
+                    \n\t2. {stat_dict["2"]["description"]}\
+                    \n\t3. {stat_dict["3"]["description"]}\
+                    \n\t4. {stat_dict["4"]["description"]}\
+                    \n\t5. {stat_dict["5"]["description"]}\
+                """)
+                print(prompt)
+                option = input().strip()
 
-            try:
-                option = int(input().strip())
-                if not option or not option in list(range(1, 10)):
-                    print_error("Invalid input. Input a number from 1-9")
-                    return
-            except:
-                print_error("Invalid input. Input a number from 1-9")
+            if not option or not (option in list(stat_dict.keys())):
+                print_error("Invalid input")
                 return
 
-            if option == 5:
+            if option == "5":
                 avg_aircraft_age = self.db_cursor.execute(
                     stat_dict[option]["query"]).fetchone()[0]
-                print_table(f"Average aircraft age is {avg_aircraft_age}")
+                print_table(f"Average aircraft age is {avg_aircraft_age:.2f}")
             else:
                 print_table(
                     f"Table Description: {stat_dict[option]['description']}")
@@ -341,12 +323,106 @@ class Main:
     def execute(self):
         while cmd := input(format_prompt(f"Enter a command ({self.exit_cmd} to quit): ")).strip():
             if cmd == self.exit_cmd:
+                self.db_cursor.close()
+                self.conn.close()
                 break
             if op := self.cmd_types.get(cmd):
                 op()
             else:
                 print_error("Invalid input; Only accepts the following commands: " +
                             " ".join(self.cmd_types.keys()))
+
+    def validateData(self, data, table_name):
+        attributes = self.db_cursor.execute(
+            f"PRAGMA table_info({table_name})").fetchall()
+        if len(data) != len(attributes):
+            return f"Invalid data input: incorrect number of arguments"
+        for idx, attr in enumerate(attributes):
+            if not self.validateField(data[idx], attr, table_name):
+                return f"Invalid data input for attribute: {attr[1]}"
+
+    def validateUpdateData(self, data, dict, table_name):
+        # check arg length (>= 2)
+        if len(data) < 2:
+            return "Invalid input: supply at least 2 agruments"
+
+        # check item to update exists
+        _res = self.db_cursor.execute(
+            f"SELECT {dict[table_name]['pk']} FROM {table_name};").fetchall()
+        _existing_ids = map(lambda x: str(x[0]), _res)
+        if data[0] not in _existing_ids:
+            return f"{data[0]} does not exist in {table_name}"
+
+        # convert arg to dictionary
+        attributes = self.db_cursor.execute(
+            f"PRAGMA table_info({table_name})").fetchall()
+        for arg in data[1:]:
+            _split = arg.strip().split("=")
+            if len(_split) != 2:
+                return "Invalid input: separate attribute name and new attribute value by '='"
+
+            # check if attr is PK
+            if _split[0] == dict[table_name]['pk']:
+                return "Invalid input: cannot update primary key"
+            # check if attr exists
+            try:
+                attr_idx = list(map(lambda x: x[1], attributes)).index(
+                    _split[0])
+            except:
+                return f"Invalid input: {_split[0]} is not an attribute"
+
+            if not self.validateField(_split[1], attributes[attr_idx], table_name):
+                return f"Invalid data input for attribute: {_split[0]}"
+
+    def validateField(self, data, attr, table_name):
+        # TODO: foreign key validation
+        [_, name, datatype, notnull, default, pk] = attr
+        if notnull:
+            if data == "":
+                print_error(f"{name} cannot be null")
+                return False
+        else:
+            if data == "":
+                return True
+
+        if pk:
+            _res = self.db_cursor.execute(
+                f"SELECT {name} FROM {table_name};").fetchall()
+            _existing_ids = map(lambda x: str(x[0]), _res)
+            if data in _existing_ids:
+                print_error(
+                    f"{name} is a primary key but the provided id is not unique")
+                return False
+
+        # validate foreign key
+        fk_list = self.db_cursor.execute(
+            f"PRAGMA foreign_key_list({table_name})").fetchall()
+        fk_from_names = list(map(lambda x: x[3], fk_list))
+        try:
+            idx = fk_from_names.index(name)
+            [_, _, to_table, _, fk_to_name, _, _, _] = fk_list[idx]
+            print(to_table, fk_to_name)
+            fk_values = self.db_cursor.execute(
+                f"SELECT {fk_to_name} FROM {to_table};").fetchall()
+            fk_values = list(map(lambda x: str(x[0]), fk_values))
+            if data not in fk_values:
+                print_error(
+                    f"{name} is a foreign key and the provided value does not exist in the linked table [{to_table}].\nCreate a new entry at the linked table first.")
+                return False
+        except:
+            pass
+
+        if default == "'2022-01-01'":
+            # validate date
+            if not re.search("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", data):
+                print_error(
+                    f"{name} should be in date format: YYYY-MM-DD")
+                return False
+        elif datatype == "INTEGER":
+            if not data.isdigit():
+                print_error(f"{name} should be an integer")
+                return False
+        return True
 
     def checkItemExistInTable(self, value, attribute, table):
         _query = f"SELECT {attribute} FROM {table};"
@@ -359,9 +435,6 @@ class Main:
         for row in res:
             print_table("  ".join(map(lambda x: str(x), row)))
         # TODO: get a nicer presentation
-
-    # def _getHeader(self):
-    #     return list(map(lambda x: x[0], self.db_cursor.description))
 
 
 Main().execute()
