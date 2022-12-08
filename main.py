@@ -2,6 +2,7 @@ import sqlite3
 import traceback
 import re
 from termcolor import colored, cprint
+import pandas as pd
 
 
 def print_status(str):
@@ -130,13 +131,22 @@ class Main:
                     f"Invalid input; Only accept: {' '.join(list(insert_dict.keys()))}")
                 return
 
-            data = [field.strip() for field in input(
-                format_prompt(insert_dict[option]["prompt"])).split(",")]
+            data = []
+            for field in input(
+                    format_prompt(insert_dict[option]["prompt"])).split(","):
+                field = field.strip()
+                print(field)
+                if field == "":
+                    data.append(None)
+                else:
+                    data.append(field)
+            # data = [field.strip() for field in input(
+                # format_prompt(insert_dict[option]["prompt"])).split(",")]
+            print(data)
 
             if error := self.validateData(data, option):
                 print_error(error)
                 return
-
             self.db_cursor.execute(insert_dict[option]["query"], data)
             self.conn.commit()
             print_status('Data successfully inserted.')
@@ -148,7 +158,7 @@ class Main:
         try:
             update_dict = {
                 "flight": {
-                    "prompt": "Update flight data in the following format: flight_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\nNotes:\n\t- e.g. BA123, start_airport=BLN\n\t- flight_id is not editable\n",
+                    "prompt": "Update flight data in the following format: flight_id, attribute_1=attribute_1_new, attribute_2=attribute_2_new...\nNotes:\n\t- e.g. BA123, start_airport=BLN\n\t- flight_id is not editable\n\t- to remove pilot_2 value of a row, pass in 'pilot_2='\n",
                     "query": "UPDATE flight SET conds_placeholder WHERE flight_id=?",
                     "pk": "flight_id"
                 },
@@ -184,7 +194,10 @@ class Main:
             for arg in data[1:]:
                 _split = arg.split("=")
                 conds.append(_split[0].strip() + "=?")
-                params.append(_split[1].strip())
+                if _split[1].strip():
+                    params.append(_split[1].strip())
+                else:
+                    params.append(None)
             _query = update_dict[option]["query"].replace(
                 "conds_placeholder", ",".join(conds))
             params.append(data[0])
@@ -453,11 +466,12 @@ class Main:
     def validateField(self, data, attr, table_name):
         [_, name, datatype, notnull, default, pk] = attr
         if notnull:
-            if data == "":
+            if data == None or data == "":
                 print_error(f"{name} cannot be null")
                 return False
         else:
-            if data == "":
+            if data == None or data == "":
+                print('here')
                 return True
 
         if pk:
@@ -513,13 +527,16 @@ class Main:
             return f"{value} is not an unique identifier in {table_name}"
 
     def display_table(self, query, params={}):
-        res = self.db_cursor.execute(query, params)
-        headers = map(lambda x: str(x[0]), self.db_cursor.description)
-        print_table("  ".join(headers))
-        for row in res:
-            print_table("  ".join(map(lambda x: str(x), row)))
-        # TODO: get a nicer presentation (e.g. use pandas)
-        # TODO: special layout for empty table?
+        df = pd.read_sql_query(query, self.conn, params=params)
+        if df.shape[0] == 0:
+            print_table("Table is empty")
+        else:
+            df.style.set_table_styles(
+                [{
+                    'selector': 'th',
+                    'props': [('background-color', '#DBFF33')]
+                }])
+            print_table(df)
 
 
 Main().execute()
