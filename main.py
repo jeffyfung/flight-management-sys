@@ -117,7 +117,7 @@ class Main:
                     "query": "INSERT INTO pilot (staff_id, last_name, first_name) VALUES (?, ?, ?)"
                 },
                 "aircraft": {
-                    "prompt": "Input data in the following format: staff_id, last_name, first_name\nNote:\n\t- staff_id must be unique\n\t- all fields are compulsory\n",
+                    "prompt": "Input data in the following format: aircraft_id, age, capacity\nNote:\n\t- aircraft_id must be unique\n\t- all fields are compulsory\n",
                     "query": "INSERT INTO aircraft (aircraft_id, age, capacity) VALUES (?, ?, ?)"
                 }
             }
@@ -199,24 +199,100 @@ class Main:
     def delete(self):
         try:
             prompt = format_prompt(
-                "Input the flight_id of the flight you wish to delete:\n")
-            flight_id = input(prompt).strip()
-
-            if not self.checkItemExistInTable(flight_id, "flight_id", "flight"):
-                print_error("Invalid flight_id")
+                f"Which table to delete? ({' '.join(self.table_names)}): ")
+            option = input(prompt).strip()
+            if not option or not (option in self.table_names):
+                print_error(
+                    f"Invalid input; Only accept: {' '.join(self.table_names)}")
                 return
 
-            _query = "DELETE FROM flight WHERE flight_id = :flight_id"
-            self.db_cursor.execute(_query, {"flight_id": flight_id})
+            second_prompt = format_prompt(
+                "Input the unique identifier of the item to delete: ")
+
+            # check if the input type is correct
+            input_id = input(second_prompt).strip()
+
+            pk_name = self.getPKName(option)
+            if err := self.validateValueInPK(input_id, option, pk_name):
+                print_error(err)
+                return
+
+            _query = f"DELETE FROM {option} WHERE {pk_name} = ?"
+            self.db_cursor.execute(_query, [input_id])
             self.conn.commit()
             print_status(
-                f'Successfully delete flight {flight_id}. Here is the latest view of flight:')
-            self.view("flight")
-        except:
-            print(traceback.format_exc())
+                f'Successfully delete {input_id} from {option}. Here is the latest view of {option}:')
+            self.view(option)
+        except Exception as e:
+            if e.args == ("FOREIGN KEY constraint failed", ):
+                print_error(
+                    f"This item is currently used in the flight table.\nUpdate the flight table first.")
+            else:
+                print_error(e)
+                print(traceback.format_exc())
 
     def search(self):
-        raise NotImplementedError()
+        try:
+            # implement filter
+            search_dict = {
+                "1": {
+                    "description": "filter flight by flight_id",
+                    "args": ["flight_id"],
+                    "table": "flight"
+                },
+                "2": {
+                    "description": "filter flight by destination_aiport",
+                    "args": ["destination_airport"],
+                    "table": "flight"
+                },
+                "3": {
+                    "description": "filter flight by departure_date",
+                    "args": ["departure_date"],
+                    "table": "flight"
+                },
+                "4": {
+                    "description": "filter flight by departure_date and destination_airport",
+                    "args": ["departure_date", "destination_airport"],
+                    "table": "flight"
+                },
+                "5": {
+                    "description": "filter aircraft by age",
+                    "args": ["age"],
+                    "table": "aircraft"
+                }
+            }
+
+            prompt = format_prompt(f"""\
+                        \nSelect the filter you wish to apply (input 1-2):\
+                        \n\t1. {search_dict["1"]["description"]}\
+                        \n\t2. {search_dict["2"]["description"]}\
+                        \n\t3. {search_dict["3"]["description"]}\
+                        \n\t4. {search_dict["4"]["description"]}\
+                        \n\t5. {search_dict["5"]["description"]}\
+                    """)
+            print(prompt)
+            option = input().strip()
+
+            if not option or not (option in list(search_dict.keys())):
+                print_error("Invalid input")
+                return
+
+            input_data = {}
+            for arg in search_dict[option]["args"]:
+                input_data[arg] = input(
+                    format_prompt(f"Enter {arg}: ")).strip()
+
+            conds = " AND ".join(
+                [f"{arg} = :{arg}" for arg in search_dict[option]["args"]])
+            _query = f"SELECT * FROM {search_dict[option]['table']} WHERE {conds}"
+            print(_query)
+            print_table(
+                f"Table Description: {search_dict[option]['description']}")
+            self.display_table(_query, input_data)
+
+        except Exception as e:
+            print_error(e)
+            print(traceback.format_exc())
 
     def alter(self):
         raise NotImplementedError()
@@ -375,7 +451,6 @@ class Main:
                 return f"Invalid data input for attribute: {_split[0]}"
 
     def validateField(self, data, attr, table_name):
-        # TODO: foreign key validation
         [_, name, datatype, notnull, default, pk] = attr
         if notnull:
             if data == "":
@@ -401,7 +476,6 @@ class Main:
         try:
             idx = fk_from_names.index(name)
             [_, _, to_table, _, fk_to_name, _, _, _] = fk_list[idx]
-            print(to_table, fk_to_name)
             fk_values = self.db_cursor.execute(
                 f"SELECT {fk_to_name} FROM {to_table};").fetchall()
             fk_values = list(map(lambda x: str(x[0]), fk_values))
@@ -424,9 +498,19 @@ class Main:
                 return False
         return True
 
-    def checkItemExistInTable(self, value, attribute, table):
-        _query = f"SELECT {attribute} FROM {table};"
-        return (value, ) in self.db_cursor.execute(_query).fetchall()
+    def getPKName(self, table_name):
+        attributes = self.db_cursor.execute(
+            f"PRAGMA table_info({table_name});").fetchall()
+        for attr in attributes:
+            [_, name, _, _, _, pk] = attr
+            if pk:
+                return name
+
+    def validateValueInPK(self, value, table_name, pk_name):
+        check = self.db_cursor.execute(
+            f"SELECT {pk_name} FROM {table_name} WHERE {pk_name} = ?;", [value]).fetchone()
+        if not check:
+            return f"{value} is not an unique identifier in {table_name}"
 
     def display_table(self, query, params={}):
         res = self.db_cursor.execute(query, params)
@@ -434,7 +518,8 @@ class Main:
         print_table("  ".join(headers))
         for row in res:
             print_table("  ".join(map(lambda x: str(x), row)))
-        # TODO: get a nicer presentation
+        # TODO: get a nicer presentation (e.g. use pandas)
+        # TODO: special layout for empty table?
 
 
 Main().execute()
