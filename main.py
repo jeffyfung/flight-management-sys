@@ -206,8 +206,8 @@ class Main:
                 return
 
             # second prompt to get data to update
-            data = [field.strip() for field in input(
-                format_prompt(update_dict[option]["prompt"])).split(",")]
+            user_input = input(format_prompt(update_dict[option]['prompt']))
+            data = [field.strip() for field in user_input.split(',')]
 
             # data validation
             if error := self.validateUpdateData(data, update_dict, option):
@@ -381,7 +381,7 @@ class Main:
         try:
             # first prompt to user
             prompt = format_prompt(
-                "Input (flight / pilot / aircraft / all):\n")
+                "Input (flight / pilot / aircraft / all / user-defined):\n")
             query_dict = {
                 "flight": "SELECT * FROM flight",
                 "pilot": "SELECT * FROM pilot",
@@ -390,7 +390,8 @@ class Main:
                         FROM flight \
                         INNER JOIN aircraft AS a ON flight.aircraft_id = a.aircraft_id \
                         INNER JOIN pilot AS p1 ON flight.pilot_1 = p1.staff_id \
-                        LEFT JOIN pilot AS p2 ON flight.pilot_2 = p2.staff_id"
+                        LEFT JOIN pilot AS p2 ON flight.pilot_2 = p2.staff_id",
+                "user-defined": "SELECT cols FROM table;"
             }
 
             # if the option agrument is not provided, prompt user to select the table to view
@@ -398,7 +399,37 @@ class Main:
                 option = input(prompt).strip()
 
             if _query := query_dict.get(option, False):
-                self.display_table(_query)
+                if (option == "user-defined"):
+                    prompt = format_prompt(
+                        f"Which table do you want to view ({'/ '.join(self.table_names)})?: ")
+                    table = input(prompt)
+
+                    table_attributes = self.db_cursor.execute(
+                        f"PRAGMA table_info({table})").fetchall()
+                    table_attributes = list(
+                        map(lambda x: x[1], table_attributes))
+                    prompt = format_prompt(
+                        f"Which attributes do you want to view in {table}? ({'/ '.join(table_attributes)} - separate the selected attributes with comma)?: ")
+                    input_attributes = input(prompt).split(",")
+
+                    # check if attributes exist in table
+                    # TODO: refactor to separate function
+                    for attr in table_attributes:
+                        print(attr)
+                        table_attributes.append(attr)
+                    for attr in input_attributes:
+                        if attr not in table_attributes:
+                            print_error(
+                                f"Invalid input; Only accept: {'/ '.join(table_attributes)}")
+                            self.view("user-defined")
+                            return
+
+                    _query = _query.replace(
+                        "cols", ", ".join(input_attributes))
+                    _query = _query.replace("table", table)
+                    self.display_table(_query)
+                else:
+                    self.display_table(_query)
             else:
                 print_error(
                     "Invalid input; Only accept: flight/ pilot/ aircraft/ all")
